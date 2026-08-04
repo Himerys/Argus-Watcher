@@ -228,7 +228,15 @@ if ($effectiveRequiredGroup) {
 # --- STA-Guard für WPF ------------------------------------------------------
 if (-not $NoGui -and [Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
     if ($PSVersionTable.PSEdition -eq 'Desktop' -and $PSCommandPath) {
-        Start-Process -FilePath 'powershell.exe' -ArgumentList @('-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+        $staArgs = @('-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+        # GUI-relevante Parameter an den Neustart weiterreichen
+        foreach ($fwd in @('ProfilePath', 'LogPath', 'RequiredGroup', 'TimeoutSec')) {
+            if ($PSBoundParameters.ContainsKey($fwd)) {
+                $staArgs += ('-{0}' -f $fwd)
+                $staArgs += ('"{0}"' -f $PSBoundParameters[$fwd])
+            }
+        }
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $staArgs
         return
     }
     Write-Error 'Die grafische Oberfläche benötigt einen STA-Thread. Bitte mit "powershell.exe -STA" starten oder -NoGui verwenden.'
@@ -1181,7 +1189,11 @@ $script:ArgusEngine = {
             & $Ctx.Progress 0 'Schreibe CSV...'
             $delim = if ($Opt.CsvDelimiter) { $Opt.CsvDelimiter } else { ';' }
             $enc = New-Object System.Text.UTF8Encoding($true)   # BOM: deutsches Excel braucht ihn für Umlaute
-            $writer = New-Object System.IO.StreamWriter($targets.CsvPath, $false, $enc)
+            # Erst in Temp-Datei schreiben, dann atomar ersetzen: bei Abbruch/
+            # Fehler bleibt eine vorhandene Zieldatei unangetastet.
+            $csvTmp = $targets.CsvPath + '.tmp'
+            $csvOk = $false
+            $writer = New-Object System.IO.StreamWriter($csvTmp, $false, $enc)
             try {
                 $quoteChars = [char[]]@($delim[0], '"', "`n", "`r")
                 $line = New-Object System.Text.StringBuilder
@@ -1213,56 +1225,68 @@ $script:ArgusEngine = {
                     }
                     & $emit $vals
                 }
+                $csvOk = $true
             }
             finally {
                 $writer.Dispose()
+                if (-not $csvOk) { try { Remove-Item -LiteralPath $csvTmp -Force } catch { $null = $_ } }
             }
+            Move-Item -LiteralPath $csvTmp -Destination $targets.CsvPath -Force
             & $Ctx.Log "CSV geschrieben: $($targets.CsvPath)"
         }
 
         if ($targets.XlsxPath) {
             & $Ctx.Progress 0 'Bereite Excel-Export vor...'
             Import-Module ImportExcel -ErrorAction Stop
-            # Alte Datei entfernen: verhindert Reste alter Zeilen / Tabellen-Kollisionen
-            if (Test-Path -LiteralPath $targets.XlsxPath) { Remove-Item -LiteralPath $targets.XlsxPath -Force }
-
-            $rowsOut = New-Object System.Collections.ArrayList
-            $ri = 0
-            foreach ($row in $Table.Rows) {
-                $ri++
-                if (($ri % 1000) -eq 0) {
-                    if (& $Ctx.IsCancelled) { throw (New-Object System.OperationCanceledException 'Abgebrochen durch Benutzer.') }
-                    & $Ctx.Progress ([int](80 * $ri / [Math]::Max(1, $Table.Rows.Count))) "Excel: Zeile $ri / $($Table.Rows.Count)"
+            # Erst in Temp-Datei schreiben, dann atomar ersetzen: kein Verlust der
+            # alten Datei bei Abbruch/Fehler, keine Reste alter Zeilen/Tabellen.
+            $xlsxTmp = $targets.XlsxPath + '.tmp.xlsx'
+            if (Test-Path -LiteralPath $xlsxTmp) { Remove-Item -LiteralPath $xlsxTmp -Force }
+            $xlsxOk = $false
+            try {
+                $rowsOut = New-Object System.Collections.ArrayList
+                $ri = 0
+                foreach ($row in $Table.Rows) {
+                    $ri++
+                    if (($ri % 1000) -eq 0) {
+                        if (& $Ctx.IsCancelled) { throw (New-Object System.OperationCanceledException 'Abgebrochen durch Benutzer.') }
+                        & $Ctx.Progress ([int](80 * $ri / [Math]::Max(1, $Table.Rows.Count))) "Excel: Zeile $ri / $($Table.Rows.Count)"
+                    }
+                    $rec = [ordered]@{}
+                    foreach ($h in $headers) {
+                        $v = $row[$h]
+                        if ($v -is [DBNull]) { $rec[$h] = $null }
+                        elseif ($v -is [string]) { $rec[$h] = Protect-ArgusCell $v 'xlsx' $false }
+                        else { $rec[$h] = $v }
+                    }
+                    [void]$rowsOut.Add([PSCustomObject]$rec)
                 }
-                $rec = [ordered]@{}
-                foreach ($h in $headers) {
-                    $v = $row[$h]
-                    if ($v -is [DBNull]) { $rec[$h] = $null }
-                    elseif ($v -is [string]) { $rec[$h] = Protect-ArgusCell $v 'xlsx' $false }
-                    else { $rec[$h] = $v }
+
+                & $Ctx.Progress 85 'Schreibe Excel...'
+                $xlParams = @{
+                    Path          = $xlsxTmp
+                    WorksheetName = 'Export'
+                    TableName     = 'ArgusExport'
+                    TableStyle    = 'Medium2'
+                    FreezeTopRow  = $true
+                    # Keine Zahlen-Autokonvertierung: führende Nullen (PLZ 01067,
+                    # EmployeeID) und lange Nummern bleiben unverändert erhalten.
+                    NoNumberConversion = '*'
                 }
-                [void]$rowsOut.Add([PSCustomObject]$rec)
-            }
+                if ($Table.Rows.Count -le 20000) { $xlParams.AutoSize = $true }
+                else { & $Ctx.Log 'Hinweis: AutoSize bei >20000 Zeilen deaktiviert (Performance).' }
+                $rowsOut | Export-Excel @xlParams
 
-            & $Ctx.Progress 85 'Schreibe Excel...'
-            $xlParams = @{
-                Path          = $targets.XlsxPath
-                WorksheetName = 'Export'
-                TableName     = 'ArgusExport'
-                TableStyle    = 'Medium2'
-                FreezeTopRow  = $true
-                # Keine Zahlen-Autokonvertierung: führende Nullen (PLZ 01067,
-                # EmployeeID) und lange Nummern bleiben unverändert erhalten.
-                NoNumberConversion = '*'
+                if ($Opt.Meta) {
+                    $info = foreach ($k in $Opt.Meta.Keys) { [PSCustomObject]@{ Eigenschaft = $k; Wert = [string]$Opt.Meta[$k] } }
+                    $info | Export-Excel -Path $xlsxTmp -WorksheetName 'Info' -AutoSize
+                }
+                $xlsxOk = $true
             }
-            if ($Table.Rows.Count -le 20000) { $xlParams.AutoSize = $true }
-            else { & $Ctx.Log 'Hinweis: AutoSize bei >20000 Zeilen deaktiviert (Performance).' }
-            $rowsOut | Export-Excel @xlParams
-
-            if ($Opt.Meta) {
-                $info = foreach ($k in $Opt.Meta.Keys) { [PSCustomObject]@{ Eigenschaft = $k; Wert = [string]$Opt.Meta[$k] } }
-                $info | Export-Excel -Path $targets.XlsxPath -WorksheetName 'Info' -AutoSize
+            finally {
+                if (-not $xlsxOk) { try { if (Test-Path -LiteralPath $xlsxTmp) { Remove-Item -LiteralPath $xlsxTmp -Force } } catch { $null = $_ } }
             }
+            Move-Item -LiteralPath $xlsxTmp -Destination $targets.XlsxPath -Force
             & $Ctx.Log "Excel geschrieben: $($targets.XlsxPath)"
         }
 
@@ -2498,11 +2522,13 @@ function Show-ArgusOuPicker {
     }
     $quietCtx = @{ Log = { param($m) $null = $m }; Progress = { param($p, $st) $null = $p; $null = $st }; IsCancelled = { $false } }
     $root = $null
+    $window.Cursor = [System.Windows.Input.Cursors]::Wait
     try { $root = New-ArgusRoot $connParams $quietCtx }
     catch {
         [System.Windows.MessageBox]::Show("Verbindung fehlgeschlagen: $($_.Exception.Message)", 'OU auswählen', 'OK', 'Error') | Out-Null
         return $null
     }
+    finally { $window.Cursor = $null }
 
     try {
         $dlg = New-Object System.Windows.Window
@@ -2536,6 +2562,7 @@ function Show-ArgusOuPicker {
             param($Item)
             $Item.Items.Clear()
             $parentEntry = $null; $ds = $null; $res = $null
+            $dlg.Cursor = [System.Windows.Input.Cursors]::Wait
             try {
                 $parentEntry = New-ArgusBoundEntry $root ([string]$Item.Tag)
                 $ds = New-ArgusSearcher $parentEntry '(|(objectClass=organizationalUnit)(objectClass=container)(objectClass=builtinDomain))' @('name', 'distinguishedName') $root.TimeoutSec
@@ -2556,6 +2583,7 @@ function Show-ArgusOuPicker {
                 [void]$Item.Items.Add("Fehler: $($_.Exception.Message)")
             }
             finally {
+                $dlg.Cursor = $null
                 if ($res) { try { $res.Dispose() } catch { $null = $_ } }
                 if ($ds)  { try { $ds.Dispose() }  catch { $null = $_ } }
                 if ($parentEntry) { try { $parentEntry.Dispose() } catch { $null = $_ } }
@@ -2626,6 +2654,7 @@ $script:WorkerBody = {
                 Add-Log 'Verbindungstest gestartet...'
                 $root = New-ArgusRoot $ConnParams $ctx
                 try {
+                    if (& $ctx.IsCancelled) { throw (New-Object System.OperationCanceledException 'Abgebrochen durch Benutzer.') }
                     $info = New-Object System.Collections.ArrayList
                     [void]$info.Add(("Domain Controller: {0}" -f $(if ($root.DnsHost) { $root.DnsHost } else { '(serverlose Bindung / DC-Locator)' })))
                     [void]$info.Add(("Verschlüsselung:   {0}" -f $(if ($root.UseSsl) { 'LDAPS (SSL/TLS)' } else { 'LDAP mit Signing+Sealing' })))
