@@ -116,6 +116,7 @@ Der Excel-Export enthält zusätzlich ein **Info-Blatt** mit denselben Audit-Met
 | Symptom | Ursache / Lösung |
 |---|---|
 | „Der Server ist nicht verbunden" / Timeout | DC/Port prüfen, „Verbindung testen" nutzen; Firewall 389/636 |
+| Suche scheitert sofort mit „Es ist ein Fehler bei der Ausführung aufgetreten" (operations error, 0x80072020) | Sitzung hat keine nutzbaren Domänen-Anmeldedaten (PowerShell-Remoting/Double-Hop, lokales Konto, Rechner nicht in der Domäne) – RootDSE ist anonym lesbar, daher „gelingt" der Bind scheinbar. Abhilfe: „Alternative Anmeldedaten" bzw. `-Credential` verwenden und den DC als FQDN (nicht IP) angeben. Seit v2.0.1 deckt „Verbindung testen" dies per Probesuche auf |
 | Excel-Export scheitert, CSV geht | `ImportExcel` fehlt → Button im Ausgabe-Bereich oder Softwareverteilung |
 | „Datei ist gesperrt" | Zieldatei ist in Excel geöffnet → schließen |
 | Gruppenname „mehrdeutig" | Vollständigen DN der Gruppe angeben (Meldung listet die Kandidaten) |
@@ -130,6 +131,13 @@ Profil-Roundtrip) ist ohne Domäne testbar:
 ```powershell
 powershell -File .\tests\Argus.Tests.ps1   # oder pwsh, läuft auch unter Linux
 ```
+
+## Änderungen in v2.0.1
+
+- „Verbindung testen" führt zusätzlich eine Probesuche (1 Objekt, Basis-DN) aus.
+  Damit fallen Verbindungen ohne nutzbare Domänen-Anmeldedaten (Double-Hop/Remoting,
+  lokales Konto) bereits beim Test mit einer verständlichen Meldung auf – statt erst
+  bei der eigentlichen Suche mit einem generischen „operations error" (0x80072020).
 
 ## Änderungen in v2.0.0 (gegenüber dem ursprünglichen Skript)
 
