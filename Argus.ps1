@@ -194,7 +194,7 @@ param(
     [ValidateRange(0, 86400)][int]$TimeoutSec = 120
 )
 
-$script:ArgusVersion = '2.0.0'
+$script:ArgusVersion = '2.0.1'
 $script:ArgusName    = 'Argus'
 
 # --- Anwendungsverzeichnisse ------------------------------------------------
@@ -505,6 +505,27 @@ $script:ArgusEngine = {
         $ds.PropertiesToLoad.Clear()
         foreach ($p in $Load) { [void]$ds.PropertiesToLoad.Add($p) }
         return $ds
+    }
+
+    # Mini-Probesuche (1 Objekt) gegen die Such-Basis. Deckt Verbindungen auf,
+    # deren Bind nur scheinbar gelingt - RootDSE ist anonym lesbar, sodass ohne
+    # nutzbare Domänen-Anmeldedaten (Remoting/Double-Hop, lokales Konto, Rechner
+    # nicht in der Domäne) erst die echte Suche mit "operations error"
+    # (0x80072020) scheitert. Wirft bei Fehlschlag; liefert sonst die Trefferzahl.
+    function Test-ArgusSearchProbe {
+        param($Root)
+        $ds = New-ArgusSearcher $Root.Search '(objectClass=*)' @('distinguishedName') $Root.TimeoutSec
+        $res = $null
+        try {
+            $ds.PageSize  = 0   # Paging ist für 1 Objekt unnötig
+            $ds.SizeLimit = 1
+            $res = $ds.FindAll()
+            return $res.Count
+        }
+        finally {
+            if ($res) { try { $res.Dispose() } catch { $null = $_ } }
+            try { $ds.Dispose() } catch { $null = $_ }
+        }
     }
 
     # Property-Wert lesen; Mehrfachwerte werden sortiert mit '; ' verbunden,
@@ -2655,12 +2676,23 @@ $script:WorkerBody = {
                 $root = New-ArgusRoot $ConnParams $ctx
                 try {
                     if (& $ctx.IsCancelled) { throw (New-Object System.OperationCanceledException 'Abgebrochen durch Benutzer.') }
+                    # Probesuche: der Bind allein ist kein Beweis, dass Suchen
+                    # funktionieren (RootDSE ist anonym lesbar). Ohne Probe fiele
+                    # z. B. eine Sitzung ohne nutzbare Domänen-Anmeldedaten erst
+                    # bei der echten Suche mit "operations error" auf.
+                    Add-Log 'Probesuche (1 Objekt) gegen die Such-Basis...'
+                    try { $null = Test-ArgusSearchProbe $root }
+                    catch {
+                        throw ("Bind erfolgreich, aber der Server hat die Probesuche abgewiesen: {0}`nTypische Ursache: keine nutzbaren Domänen-Anmeldedaten in dieser Sitzung (PowerShell-Remoting/Double-Hop, lokales Konto, Rechner nicht in der Domäne).`nAbhilfe: 'Alternative Anmeldedaten' verwenden und den DC als FQDN angeben." -f $_.Exception.Message)
+                    }
+                    Add-Log 'Probesuche erfolgreich.'
                     $info = New-Object System.Collections.ArrayList
                     [void]$info.Add(("Domain Controller: {0}" -f $(if ($root.DnsHost) { $root.DnsHost } else { '(serverlose Bindung / DC-Locator)' })))
                     [void]$info.Add(("Verschlüsselung:   {0}" -f $(if ($root.UseSsl) { 'LDAPS (SSL/TLS)' } else { 'LDAP mit Signing+Sealing' })))
                     [void]$info.Add(("Global Catalog:    {0}" -f $(if ($root.IsGc) { 'ja (Forest-weit)' } else { 'nein' })))
                     [void]$info.Add(("Such-Basis (DN):   {0}" -f $root.BaseDn))
                     if ($root.DomainDn -ne $root.BaseDn) { [void]$info.Add(("Domänen-Wurzel:    {0}" -f $root.DomainDn)) }
+                    [void]$info.Add('Probesuche:        OK (Suche mit Leserechten möglich)')
                     $sync.TestInfo = ($info.ToArray() -join "`n")
                     Add-Log 'Verbindungstest erfolgreich.'
                 }
