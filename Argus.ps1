@@ -90,9 +90,10 @@
    werden automatisch gesetzt.
 
  .PARAMETER Format
-   'xlsx', 'csv' oder 'both'. Standard: xlsx (Headless: csv, wenn
-   ImportExcel fehlt, wird mit Warnung auf csv ausgewichen ist nicht der
-   Fall - xlsx ohne ImportExcel bricht mit Fehler ab).
+   'xlsx', 'csv' oder 'both'. Ohne Angabe gilt der Wert aus dem Profil,
+   sonst xlsx. Der Excel-Export benötigt das Modul 'ImportExcel'; fehlt es,
+   bricht der Lauf mit einem Fehler ab (kein automatischer Wechsel auf csv).
+   In dem Fall -Format csv verwenden.
 
  .PARAMETER Credential
    Alternative Anmeldedaten für die LDAP-Verbindung.
@@ -1809,7 +1810,7 @@ if ($NoGui) {
       <StackPanel Orientation="Horizontal">
         <TextBlock Text="Argus" Foreground="White" FontSize="20" FontWeight="Bold" VerticalAlignment="Center"/>
         <Border Background="#312E81" CornerRadius="6" Padding="7,2" Margin="10,0,0,0" VerticalAlignment="Center">
-          <TextBlock x:Name="lblVersion" Text="v2.0.0" Foreground="#C7D2FE" FontSize="11" FontWeight="SemiBold"/>
+          <TextBlock x:Name="lblVersion" Text="" Foreground="#C7D2FE" FontSize="11" FontWeight="SemiBold"/>
         </Border>
         <TextBlock Text="Active-Directory-Export via LDAP &#8226; kein ADWS/RSAT n&#246;tig &#8226; LDAPS &#8226; Vorschau &#8226; Profile &#8226; Headless"
                    Foreground="#94A3B8" FontSize="12" Margin="16,0,0,0" VerticalAlignment="Center"/>
